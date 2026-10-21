@@ -78,8 +78,8 @@ export function getSfxConfig(
 
   // Extract SFX map from AudioDefinition or direct record
   let sfxMap: Record<string, AudioSfxConfig> | undefined;
-  if ('sfx' in overrides && overrides.sfx) {
-    sfxMap = overrides.sfx;
+  if ('sfx' in overrides && (overrides as AudioDefinition).sfx) {
+    sfxMap = (overrides as AudioDefinition).sfx;
   } else if (typeof overrides === 'object') {
     sfxMap = overrides as Record<string, AudioSfxConfig>;
   }
