@@ -1,4 +1,4 @@
-import zlib from 'zlib';
+import JSZip from 'jszip';
 import type { GameDefinition } from '@nemesis/shared';
 
 export interface ExportedRustProject {
@@ -6,15 +6,35 @@ export interface ExportedRustProject {
   zipBuffer: Buffer;
 }
 
+export type ExportedRustProjectResult = Promise<ExportedRustProject> & ExportedRustProject;
+
+// Table-driven pure JS CRC-32 (isomorphic, 0 external dependencies)
+const CRC32_TABLE = new Uint32Array(256);
+for (let i = 0; i < 256; i++) {
+  let c = i;
+  for (let j = 0; j < 8; j++) {
+    c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+  }
+  CRC32_TABLE[i] = c >>> 0;
+}
+
+function calculateCrc32(buf: Uint8Array): number {
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) {
+    c = (c >>> 8) ^ CRC32_TABLE[(c ^ buf[i]) & 0xff];
+  }
+  return (c ^ 0xffffffff) >>> 0;
+}
+
 /**
- * Creates a standard ZIP file in-memory synchronously using zlib deflate and standard headers.
+ * Creates a standard ZIP archive in-memory synchronously using pure JavaScript (Method 0: Stored).
+ * 100% isomorphic and compatible with Node.js, Web Browsers, and Web Workers without native zlib.
  */
-function createZipBuffer(files: Record<string, string>): Buffer {
+function createPureJsZipBuffer(files: Record<string, string>): Buffer {
   const fileEntries: Array<{
     nameBuf: Buffer;
     crc: number;
-    compressedSize: number;
-    uncompressedSize: number;
+    size: number;
     offset: number;
   }> = [];
 
@@ -24,35 +44,32 @@ function createZipBuffer(files: Record<string, string>): Buffer {
   for (const [name, content] of Object.entries(files)) {
     const nameBuf = Buffer.from(name, 'utf8');
     const dataBuf = Buffer.from(content, 'utf8');
-    const uncompressedSize = dataBuf.length;
-    const crc = zlib.crc32(dataBuf);
-    const compressedData = zlib.deflateRawSync(dataBuf);
-    const compressedSize = compressedData.length;
+    const size = dataBuf.length;
+    const crc = calculateCrc32(dataBuf);
 
     // Local file header: 30 bytes
     const localHeader = Buffer.alloc(30);
     localHeader.writeUInt32LE(0x04034b50, 0); // signature
     localHeader.writeUInt16LE(20, 4); // version needed (2.0)
-    localHeader.writeUInt16LE(0, 6); // flags
-    localHeader.writeUInt16LE(8, 8); // compression = deflate
+    localHeader.writeUInt16LE(0, 6); // general purpose bit flags
+    localHeader.writeUInt16LE(0, 8); // compression method = 0 (Stored)
     localHeader.writeUInt16LE(0, 10); // mod time
     localHeader.writeUInt16LE(0, 12); // mod date
     localHeader.writeUInt32LE(crc, 14); // crc-32
-    localHeader.writeUInt32LE(compressedSize, 18); // compressed size
-    localHeader.writeUInt32LE(uncompressedSize, 22); // uncompressed size
+    localHeader.writeUInt32LE(size, 18); // compressed size
+    localHeader.writeUInt32LE(size, 22); // uncompressed size
     localHeader.writeUInt16LE(nameBuf.length, 26); // file name length
     localHeader.writeUInt16LE(0, 28); // extra field length
 
     fileEntries.push({
       nameBuf,
       crc,
-      compressedSize,
-      uncompressedSize,
+      size,
       offset,
     });
 
-    parts.push(localHeader, nameBuf, compressedData);
-    offset += localHeader.length + nameBuf.length + compressedData.length;
+    parts.push(localHeader, nameBuf, dataBuf);
+    offset += localHeader.length + nameBuf.length + dataBuf.length;
   }
 
   const centralDirStart = offset;
@@ -65,12 +82,12 @@ function createZipBuffer(files: Record<string, string>): Buffer {
     cdHeader.writeUInt16LE(20, 4); // version made by
     cdHeader.writeUInt16LE(20, 6); // version needed
     cdHeader.writeUInt16LE(0, 8); // flags
-    cdHeader.writeUInt16LE(8, 10); // compression = deflate
+    cdHeader.writeUInt16LE(0, 10); // compression method = 0 (Stored)
     cdHeader.writeUInt16LE(0, 12); // mod time
     cdHeader.writeUInt16LE(0, 14); // mod date
     cdHeader.writeUInt32LE(entry.crc, 16);
-    cdHeader.writeUInt32LE(entry.compressedSize, 20);
-    cdHeader.writeUInt32LE(entry.uncompressedSize, 24);
+    cdHeader.writeUInt32LE(entry.size, 20); // compressed size
+    cdHeader.writeUInt32LE(entry.size, 24); // uncompressed size
     cdHeader.writeUInt16LE(entry.nameBuf.length, 28);
     cdHeader.writeUInt16LE(0, 30); // extra field length
     cdHeader.writeUInt16LE(0, 32); // comment length
@@ -83,7 +100,7 @@ function createZipBuffer(files: Record<string, string>): Buffer {
     centralDirSize += cdHeader.length + entry.nameBuf.length;
   }
 
-  // End of central directory: 22 bytes
+  // End of central directory record: 22 bytes
   const eocd = Buffer.alloc(22);
   eocd.writeUInt32LE(0x06054b50, 0); // signature
   eocd.writeUInt16LE(0, 4); // disk number
@@ -96,6 +113,23 @@ function createZipBuffer(files: Record<string, string>): Buffer {
   parts.push(eocd);
 
   return Buffer.concat(parts);
+}
+
+/**
+ * Creates a DEFLATE-compressed ZIP file asynchronously using JSZip.
+ * 100% isomorphic and works identically in Node.js and browser environments.
+ */
+export async function createZipBufferWithJSZip(files: Record<string, string>): Promise<Buffer> {
+  const zip = new JSZip();
+  for (const [name, content] of Object.entries(files)) {
+    zip.file(name, content);
+  }
+  const uint8 = await zip.generateAsync({
+    type: 'uint8array',
+    compression: 'DEFLATE',
+    compressionOptions: { level: 6 },
+  });
+  return Buffer.from(uint8.buffer, uint8.byteOffset, uint8.byteLength);
 }
 
 /**
@@ -343,9 +377,11 @@ pub fn parse_hex_color(hex_str: &str) -> Color {
  */
 function generateMainRs(gds: GameDefinition): string {
   const gameTitle = gds.meta?.title || 'Nemesis HD-2D Adventure';
+  const promptHeader = gds.meta?.prompt ? `//! Prompt: ${gds.meta.prompt}\n` : '';
+  const descHeader = gds.meta?.description ? `//! Description: ${gds.meta.description}\n` : '';
 
   return `//! Nemesis Studio - ${gameTitle}
-//! High-Performance Native PC Bevy Runner
+${promptHeader}${descHeader}//! High-Performance Native PC Bevy Runner
 //! Autonomous Prompt-to-Playable HD-2D JRPG Engine
 
 mod loader;
@@ -1231,11 +1267,12 @@ cargo run --release
 
 /**
  * Exports a full, self-contained native Rust project for the given GameDefinition.
+ * Produces an isomorphic ZIP buffer compatible with both Node.js and browser environments.
  *
  * @param gds The GameDefinition specification to package.
- * @returns An object containing the generated file tree map and the binary ZIP buffer.
+ * @returns An object containing the generated file tree map and the binary ZIP buffer (also awaitable for JSZip DEFLATE).
  */
-export function exportRustSourceProject(gds: GameDefinition): ExportedRustProject {
+export function exportRustSourceProject(gds: GameDefinition): ExportedRustProjectResult {
   const files: Record<string, string> = {
     'Cargo.toml': generateCargoToml(gds),
     'src/main.rs': generateMainRs(gds),
@@ -1244,10 +1281,19 @@ export function exportRustSourceProject(gds: GameDefinition): ExportedRustProjec
     'README.md': generateReadmeMd(gds),
   };
 
-  const zipBuffer = createZipBuffer(files);
+  const syncZipBuffer = createPureJsZipBuffer(files);
 
-  return {
-    files,
-    zipBuffer,
-  };
+  const promise = (async () => {
+    const jszipBuffer = await createZipBufferWithJSZip(files);
+    return {
+      files,
+      zipBuffer: jszipBuffer,
+    };
+  })();
+
+  const result = promise as unknown as ExportedRustProjectResult;
+  result.files = files;
+  result.zipBuffer = syncZipBuffer;
+
+  return result;
 }
