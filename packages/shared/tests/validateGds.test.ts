@@ -130,4 +130,47 @@ describe('validateGameDefinition', () => {
     expect(result.errors.some(e => e.includes('hp') || e.includes('combat.player'))).toBe(true);
     expect(result.errors.some(e => e.includes('attack') || e.includes('combat.enemy'))).toBe(true);
   });
+
+  it('rejects array as root game definition', () => {
+    const result = validateGameDefinition([{ meta: { title: 'Array GDS' } }]);
+    expect(result.isValid).toBe(false);
+    expect(result.errors.some(e => e.includes('array'))).toBe(true);
+  });
+
+  it('detects invalid maxHp and hp exceeding maxHp', () => {
+    const gds = {
+      meta: { title: 'Max HP Test' },
+      world: { zoneName: 'Area', gridSize: [10, 10] },
+      dialogue: { initialNodeId: 'n1', nodes: { n1: { text: 'Hi', choices: [] } } },
+      combat: {
+        player: { name: 'Hero', hp: 120, maxHp: 100, attack: 10, defense: 5 },
+        enemy: { name: 'Monster', hp: 50, maxHp: 0, attack: 5, defense: 2 }
+      }
+    };
+    const result = validateGameDefinition(gds);
+    expect(result.isValid).toBe(false);
+    expect(result.errors.some(e => e.includes('combat.player') && e.includes('maxHp'))).toBe(true);
+    expect(result.errors.some(e => e.includes('combat.enemy') && e.includes('maxHp'))).toBe(true);
+  });
+
+  it('detects dangling dialogue pointers in world.npcs', () => {
+    const gds = {
+      meta: { title: 'NPC Test' },
+      world: {
+        zoneName: 'Area',
+        gridSize: [10, 10],
+        npcs: [
+          { id: 'npc_1', name: 'Elder', position: [2, 2], dialogueNodeId: 'missing_npc_node' }
+        ]
+      },
+      dialogue: { initialNodeId: 'n1', nodes: { n1: { text: 'Hi', choices: [] } } },
+      combat: {
+        player: { name: 'Hero', hp: 100, maxHp: 100, attack: 10, defense: 5 },
+        enemy: { name: 'Monster', hp: 50, maxHp: 50, attack: 5, defense: 2 }
+      }
+    };
+    const result = validateGameDefinition(gds);
+    expect(result.isValid).toBe(false);
+    expect(result.errors.some(e => e.includes('missing_npc_node'))).toBe(true);
+  });
 });

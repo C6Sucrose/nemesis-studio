@@ -1,4 +1,42 @@
-import type { GameDefinition, ValidationResult } from '../types/gds';
+import type { CombatantDefinition, GameDefinition, ValidationResult } from '../types/gds';
+
+/**
+ * Validates a combatant (player or enemy) parameters and health bounds.
+ */
+function validateCombatant(
+  role: 'player' | 'enemy',
+  combatant: unknown,
+  errors: string[]
+): void {
+  if (!combatant || typeof combatant !== 'object') {
+    errors.push(`Missing required combat.${role} definition`);
+    return;
+  }
+
+  const c = combatant as Partial<CombatantDefinition>;
+
+  if (!c.name || typeof c.name !== 'string' || c.name.trim().length === 0) {
+    errors.push(`combat.${role} missing valid name`);
+  }
+
+  if (typeof c.maxHp !== 'number' || c.maxHp <= 0) {
+    errors.push(`Invalid combat.${role} maxHp: expected positive number`);
+  }
+
+  if (typeof c.hp !== 'number' || c.hp < 0) {
+    errors.push(`Invalid combat.${role} hp: expected non-negative number`);
+  } else if (typeof c.maxHp === 'number' && c.maxHp > 0 && c.hp > c.maxHp) {
+    errors.push(`combat.${role} hp (${c.hp}) exceeds maxHp (${c.maxHp})`);
+  }
+
+  if (typeof c.attack !== 'number' || c.attack < 0) {
+    errors.push(`Invalid combat.${role} attack: expected non-negative number`);
+  }
+
+  if (typeof c.defense !== 'number' || c.defense < 0) {
+    errors.push(`Invalid combat.${role} defense: expected non-negative number`);
+  }
+}
 
 /**
  * Validates a candidate Game Definition Specification (GDS) against
@@ -16,6 +54,14 @@ export function validateGameDefinition(gds: unknown): ValidationResult {
     };
   }
 
+  if (Array.isArray(gds)) {
+    return {
+      isValid: false,
+      errors: ['Invalid Game Definition: expected an object, received an array'],
+      warnings: []
+    };
+  }
+
   const candidate = gds as Partial<GameDefinition>;
 
   // 1. Meta Validation
@@ -26,6 +72,15 @@ export function validateGameDefinition(gds: unknown): ValidationResult {
       errors.push('Invalid meta.title: expected non-empty string');
     }
   }
+
+  // Extract known dialogue node keys early for reference checking
+  const dialogueNodeKeys =
+    candidate.dialogue &&
+    typeof candidate.dialogue === 'object' &&
+    candidate.dialogue.nodes &&
+    typeof candidate.dialogue.nodes === 'object'
+      ? Object.keys(candidate.dialogue.nodes)
+      : [];
 
   // 2. World Validation
   let gridWidth = 0;
@@ -71,6 +126,32 @@ export function validateGameDefinition(gds: unknown): ValidationResult {
 
     if (world.lights && !Array.isArray(world.lights)) {
       errors.push('world.lights must be an array if provided');
+    }
+
+    if (world.npcs) {
+      if (!Array.isArray(world.npcs)) {
+        errors.push('world.npcs must be an array if provided');
+      } else {
+        for (const npc of world.npcs) {
+          if (!npc || typeof npc !== 'object') {
+            errors.push('world.npcs contains invalid npc object');
+            continue;
+          }
+
+          if (npc.position && Array.isArray(npc.position) && npc.position.length === 2 && gridWidth > 0 && gridHeight > 0) {
+            const [nx, ny] = npc.position;
+            if (nx < 0 || nx >= gridWidth || ny < 0 || ny >= gridHeight) {
+              errors.push(`NPC '${npc.id || npc.name}' position [${nx}, ${ny}] is outside grid boundaries`);
+            }
+          }
+
+          if (npc.dialogueNodeId && !dialogueNodeKeys.includes(npc.dialogueNodeId)) {
+            errors.push(
+              `Dangling NPC dialogue pointer: npc '${npc.id || npc.name || 'unnamed'}' references non_existent_node '${npc.dialogueNodeId}'`
+            );
+          }
+        }
+      }
     }
   }
 
@@ -128,45 +209,8 @@ export function validateGameDefinition(gds: unknown): ValidationResult {
   if (!candidate.combat || typeof candidate.combat !== 'object') {
     errors.push('Missing or invalid required section: combat');
   } else {
-    const combat = candidate.combat;
-
-    // Player validation
-    if (!combat.player || typeof combat.player !== 'object') {
-      errors.push('Missing required combat.player definition');
-    } else {
-      const p = combat.player;
-      if (!p.name || typeof p.name !== 'string') {
-        errors.push('combat.player missing valid name');
-      }
-      if (typeof p.hp !== 'number' || p.hp < 0) {
-        errors.push('Invalid combat.player hp: expected non-negative number');
-      }
-      if (typeof p.attack !== 'number' || p.attack < 0) {
-        errors.push('Invalid combat.player attack: expected non-negative number');
-      }
-      if (typeof p.defense !== 'number' || p.defense < 0) {
-        errors.push('Invalid combat.player defense: expected non-negative number');
-      }
-    }
-
-    // Enemy validation
-    if (!combat.enemy || typeof combat.enemy !== 'object') {
-      errors.push('Missing required combat.enemy definition');
-    } else {
-      const e = combat.enemy;
-      if (!e.name || typeof e.name !== 'string') {
-        errors.push('combat.enemy missing valid name');
-      }
-      if (typeof e.hp !== 'number' || e.hp < 0) {
-        errors.push('Invalid combat.enemy hp: expected non-negative number');
-      }
-      if (typeof e.attack !== 'number' || e.attack < 0) {
-        errors.push('Invalid combat.enemy attack: expected non-negative number');
-      }
-      if (typeof e.defense !== 'number' || e.defense < 0) {
-        errors.push('Invalid combat.enemy defense: expected non-negative number');
-      }
-    }
+    validateCombatant('player', candidate.combat.player, errors);
+    validateCombatant('enemy', candidate.combat.enemy, errors);
   }
 
   return {
